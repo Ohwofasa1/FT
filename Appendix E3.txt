@@ -1,0 +1,782 @@
+########  LSU ANALYSIS   #########
+
+
+
+# Loading all required libraries
+library(dada2); packageVersion("dada2")
+library(ggplot2)
+library(phyloseq)
+library(Biostrings)
+library(phangorn)
+library(tibble) 
+library(tidyr)  
+library(ShortRead)
+library(dbplyr)
+library(DECIPHER)   
+library(ape)   
+library(DESeq2)   
+library(ggplot2)    
+library(phyloseq)    
+library(plotly)  
+library(vegan)      
+library(tidyverse)   
+library(adespatial)  
+library(devtools)    
+library(qiime2R)  
+library(MicrobeR)  
+library(microbiome)  
+library(microbiomeSeq)  
+library("pander")  
+library(ranacapa)  
+library(grid)  
+library(gridExtra)   
+library(png)  
+library("ggdendro")  
+library(ggpubr)  
+library(RColorBrewer)  
+library(microbiomeutilities)  
+library(dplyr)
+library(microbiome)
+library(ggdendro)
+library(dendextend)
+library(reshape)
+library(microViz)
+library(lme4)
+library(ggpubr)
+library(ALDEx2)
+
+#
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+
+#
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+#
+plotQualityProfile(fnFs[1:2])
+plotQualityProfile(fnRs[1:2])
+
+#
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+
+#
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+# Removing primers 
+FWD <- "NNNNNNAACKGCGAGTGAAGMRGBA"  
+REV <- "NNNNNNYSWTYMCYBYACKKKWBYBS"
+
+trimLeft = c(FWD,REV) 
+
+#
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(220,200),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE,trimLeft = c(25,26)) 
+ 
+#
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE) 
+
+#
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+
+#
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+
+#
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+
+#
+seqtab <- makeSequenceTable(mergers)
+
+#
+table(nchar(getSequences(seqtab)))
+
+#
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+
+#
+sum(seqtab.nochim)/sum(seqtab)
+
+#
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+write.csv(track,"Sequencing Statistics - LSU.csv")
+
+#
+taxa <- assignTaxonomy(seqtab.nochim, "/nesi/project/landcare02543/data/Ohwofasa/ohwofasaa/ohwofasaa/ohwofasa/Kombucha_Analysis/Actual_analysis/Tax/sh_general_release_s_10.05.2021.tar")
+taxa.print <- taxa 
+
+#
+sequences<- getSequences(seqtab.nochim)
+names(sequences)<-sequences
+
+#
+alignment <- AlignSeqs(DNAStringSet(sequences), anchor=NA)
+
+#
+phang.align <- phyDat(as(alignment, "matrix"), type="DNA")
+
+#
+dm <- dist.ml(phang.align)
+treeNJ <- NJ(dm) 
+fit<- pml(treeNJ, data = phang.align)
+fitGTR <- update(fit, k=4, inv=0.2)
+fitGTR <- optim.pml(fitGTR, model = "GTR", optInv = TRUE, optGamma = TRUE,
+                    rearrangement = "stochastic", control = pml.control(trace = 0))
+
+# Metadata
+map <- import_qiime_sample_data("UclustCombinedMicrobiomeData.tsv")
+
+# Creating  Phyloseq object
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows = FALSE),
+              tax_table(taxa.print),phy_tree(fitGTR$tree))
+
+# Merge ps with map
+ps <- merge_phyloseq(ps, map)
+ps
+
+#  
+
+physeq.gen <- aggregate_taxa(ps,"Genus")
+
+dom.tax <- dominant_taxa(ps,level = "Genus", group="Replicate")
+head(dom.tax$dominant_overview)
+  
+#
+
+# Get count of phyla
+table(phyloseq::tax_table(ps)[, "Phylum"])
+
+#Get count of Genus
+table(phyloseq::tax_table(ps)[, "Genus"])
+
+# Compute prevalence of each feature
+prevdf <- apply(X = otu_table(ps), 
+               MARGIN = ifelse(taxa_are_rows(ps), yes = 1, no = 2), 
+               FUN = function(x){sum(x > 0)})
+
+# Add taxonomy and total read counts 
+prevdf <- data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps),
+                    tax_table(ps))
+                    
+## Compute the total and average prevalences of the features in each phylum.
+plyr::ddply(prevdf, "Phylum", function(df1){cbind(mean(df1$Prevalence),sum(df1$Prevalence))})
+
+# Giving our seq headers more manageable names (ASV_1, ASV_2...)
+asv_seqs <- colnames(seqtab.nochim_final)
+asv_headers <- vector(dim(seqtab.nochim_final)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim_final)[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+
+# Making and writing out a fasta of our final ASV seqs:
+    
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "ASVs.fa")
+
+# count table:
+asv_tab <- t(seqtab.nochim_final)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, "ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+
+# Giving taxonomy table corresponding names as above (ASV_1, ASV_2...)
+row.names(taxa.PRINT) <- sub(">", "", asv_headers)
+write.table(taxa.PRINT, "ASVs_named_correctly.tsv", sep="\t", quote=F, col.names=NA)
+
+#
+tax_tab <- as.matrix(read.table("ASVs_named_correctly.tsv", header=T,
+           row.names=1, check.names=F, sep="\t"))
+
+sample_info_tab <- read.table("UclustCombinedMicrobiomeData.tsv", header=F, row.names=1,
+                   check.names=F, sep="\t")
+
+sample_info_tab$Replicate<- as.character(sample_info_tab$V2)
+
+sample_info_tab$Site<- as.character(sample_info_tab$V3)
+
+sample_info_tab$Color<- as.character(sample_info_tab$V4)
+
+sample_info_tab$Year<- as.character(sample_info_tab$V5)
+
+sample_info_tab$SampleID<- as.character(sample_info_tab$V6)
+
+
+#Normalizing for sampling depth
+
+deseq_counts <- DESeqDataSetFromMatrix(count_tab, colData = sample_info_tab, design = ~ Site) 
+deseq_counts_vst <- DESeq(deseq_counts,sfType = "poscounts")
+vst_trans_count_tab <- assay(deseq_counts_vst)
+
+#Rarefaction curves
+rarecurve(t(count_tab), step=100, col=sample_info_tab$color, lwd=2, ylab="ASVs", label=F)
+abline(v=(min(rowSums(t(count_tab))))) # Adding a vertical line at the fewest seqs in any sample to curve above 
+
+# Abundance value transformation. 
+ps_rel_abund <- phyloseq::transform_sample_counts(ps, function(x){x / sum(x)})
+
+
+#Agglomerate to phylum-level and rename
+ps_phylum <- phyloseq::tax_glom(ps, "Phylum")
+phyloseq::taxa_names(ps_phylum) <- phyloseq::tax_table(ps_phylum)[, "Phylum"]
+phyloseq::otu_table(ps_phylum)[1:2, 1:2]
+
+#Plot
+phyloseq::plot_bar(ps_rel_abund, fill = "Phylum") +
+  geom_bar(aes(color = Phylum, fill = Phylum), stat = "identity", position = "stack") +
+  labs(x = "", y = "Relative Abundance\n") +
+  facet_wrap(~ Year, scales = "free") +
+  theme(panel.background = element_blank(),
+        axis.text.x=element_text(angle = 90, vjust = 0.5, hjust = 1),
+        axis.ticks.x=element_blank(),
+       legend.position = 'bottom')
+
+#Subset groups by year
+year_2016 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2016")
+head(sample_sums(year_2016))
+head(get_taxa(year_2016))
+
+year_2016_lsu<- (get_taxa(year_2016))
+year_2016_lsu <- t(year_2016_lsu)
+write.csv(year_2016_lsu, "Year_2016_Genus_count.csv")
+
+
+#Subset groups by year
+year_2017 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2017")
+head(sample_sums(year_2017))
+head(get_taxa(year_2017))
+
+year_2017_lsu<- (get_taxa(year_2017))
+year_2017_lsu<- t(year_2017_lsu)
+write.csv(year_2017_lsu, "Year_2017_Genus_count.csv")
+
+
+#Subset groups by year
+year_2019 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2019")
+head(sample_sums(year_2019))
+head(get_taxa(year_2019))
+
+year_2019_lsu<- (get_taxa(year_2019))
+year_2019_lsu<- t(year_2019_lsu)
+write.csv(year_2019_lsu, "Year_2019_Genus_count.csv")
+
+
+#Subset groups by year
+year_2020 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2020")
+head(sample_sums(year_2020))
+head(get_taxa(year_2020))
+
+year_2020_16S<- (get_taxa(year_2020))
+write.csv(year_2020_16S, "Year_2020_Genus_count.csv")
+
+#Subset groups by year
+year_2021 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2021")
+head(sample_sums(year_2021))
+head(get_taxa(year_2021))
+
+year_2021_16S<- (get_taxa(year_2021))
+write.csv(year_2021_16S, "Year_2021_Genus_count.csv")
+
+#Subset groups by year
+year_2022 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2022")
+head(sample_sums(year_2022))
+head(get_taxa(year_2022))
+
+year_2022_16S<- (get_taxa(year_2022))
+write.csv(year_2022_16S, "Year_2022_Genus_count.csv")
+
+
+###Alpha Diversity
+set.seed(123)
+adiv <- data.frame(
+    "Observed" = phyloseq::estimate_richness(ps, measures = "Observed"),
+  "Shannon" = phyloseq::estimate_richness(ps, measures = "Shannon"),
+  "InvSimpson" = phyloseq::estimate_richness(ps, measures = "InvSimpson"),
+    "Chao1" = phyloseq::estimate_richness(ps, measures = "Chao1"),
+  "Site" = phyloseq::sample_data(ps)$Site,
+    "Year" = phyloseq::sample_data(ps)$Year,
+"Replicate" = phyloseq::sample_data(ps)$Replicate)
+head(adiv)
+
+alpha.diversity <- estimate_richness(ps, measures = c("Observed", "InvSimpson", "Shannon"))
+head(alpha.diversity)
+
+
+##Extract meta data
+ps.meta <- meta(ps)
+(head(ps.meta))
+
+##Add the diversity table to metadata
+ps.meta$Shannon <- adiv$Shannon 
+ps.meta$InverseSimpson <- adiv$InvSimpson
+ps.meta$Observed <- adiv$Observed
+ps.meta$Chao1.Chao1 <- adiv$Chao1.Chao1
+
+
+### create a list of pairwise comaprisons for Year
+Ferment_rep <- levels(ps.meta$Year)
+Ferment_rep  <- unique(ps.meta$Year)
+print(Ferment_rep)
+
+# make a pairwise list that we want to compare.
+Ferment_rep.pairs <-  combn(seq_along(Ferment_rep), 2, simplify = FALSE, FUN = function(i)Ferment_rep[i])
+                                 
+print(Ferment_rep.pairs)
+
+
+# Using ggpubr to plot
+
+p1 <- ggboxplot(ps.meta, x = "Year", y = "Shannon",
+ , fill = "Year", palette = c("#b2df8a", "#D55E00","chocolate4", "blue","red","yellow")) 
+
+comps <- make_pairs(sample_data(ps.meta)$Year)
+Shannon_alpha_diversity <- p1 + stat_compare_means(
+      comparisons = comps,
+      label = "p.format", vjust = 0.19)
+
+print(Shannon_alpha_diversity)
+
+
+
+###Run a Shapiro-Wilk test of normality to test for normalcy statistically
+
+shapiro.test(alpha.diversity$Shannon)
+
+
+## Non-parametric permutation based MANOVA (often called PERMANOVA) implemented with ADONIS
+
+otu <- abundances(ps_rel_abund)
+meta <- meta(ps_rel_abund)
+ 
+#Statistics - Bdiv
+permanova <- adonis(t(otu) ~ Year, data = meta, permutations=1000, method = "bray")
+
+#P-value
+print(as.data.frame(permanova$aov.tab)["Year", "Pr(>F)"])
+
+
+##### Using phylogenic tree info to do some beta-diversity analysis
+## First generate distances
+ord_unifrac <- ordinate(ps_rel_abund, method = "PCoA", distance = "wunifrac") 
+ord_unifrac_un <- ordinate(ps_rel_abund, method = "PCoA", distance = "unifrac") 
+
+#Plot ordinations
+set.seed(123)
+a <- plot_ordination(ps_rel_abund, ord_unifrac, color = "Year") + geom_point(size = 8)
+
+#Plot ordinations
+set.seed(123)
+a <- plot_ordination(ps_rel_abund, ord_unifrac, color = "Year") + geom_point(size = 8)
+b <- plot_ordination(ps_rel_abund, ord_unifrac_un, color = "Year") + geom_point(size = 4)
+
+### Coplotting
+cowplot::plot_grid(a, b, nrow = 1, ncol = 2, scale = .9, labels = c("Weighted", "Unweighted"))
+
+
+#Differentially expressed ASVs
+
+sample_data(ps)$Year <- as.factor(sample_data(ps)$Year)
+ds <- phyloseq_to_deseq2(ps, ~ Year)
+
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(ds), 1, gm_mean)
+DESeq2_dds = estimateSizeFactors(ds, geoMeans = geoMeans)
+DESeq2_dds = DESeq(DESeq2_dds, fitType="local")
+
+# Extracting the differentially expressed ASVs e.g Vintage 2016 versus vintage 2017
+alpha <- 0.05
+res <- results(DESeq2_dds, contrast=c("Year", "Yr_2016", "Yr_2017"), alpha=alpha)
+res <- res[order(res$padj, na.last=NA), ]
+res_sig <- res[(res$padj < alpha), ]
+res_sig
+
+# Plotting them out
+res_sig <- cbind(as(res_sig, "data.frame"), as(tax_table(ps)[rownames(res_sig), ], "matrix"))
+colnames(res_sig) <- make.unique(names(res_sig))
+ ggplot(res_sig, aes(x=Genus, y=log2FoldChange, color=Genus)) +
+    geom_jitter(size=3, width = 0.2) +
+    theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+########  16S ANALYSIS  #########
+
+### Load required libraries as above
+
+#
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+
+#
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+
+#
+plotQualityProfile(fnFs[1:2])
+
+# 
+plotQualityProfile(fnRs[1:2])
+
+#
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+
+#
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+# 
+FWD <- "NNNNNNGTGYCAGCMGCCGCGGTAA"  
+REV <- "NNNNNNGGACTACNVGGGTWTCTAAT"
+
+trimLeft = c(FWD,REV) 
+
+#
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(220,200),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE,trimLeft = c(25,26)) 
+
+#
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+#
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+
+
+#
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+
+#
+seqtab <- makeSequenceTable(mergers)
+
+
+# 
+taxa <- assignTaxonomy(seqtab.nochim, "/nesi/project/landcare02543/data/Ohwofasa/ohwofasaa/ohwofasaa/ohwofasa/Wine_Data_Run_Repeated 02_May_2022/16S_Data_2021/Tax/silva_nr_v132_train_set.fa.gz")
+taxa <- addSpecies(taxa, "/nesi/project/landcare02543/data/Ohwofasa/ohwofasaa/ohwofasaa/ohwofasa/Wine_Data_Run_Repeated 02_May_2022/16S_Data_2021/Tax/silva_species_assignment_v138.1.fa.gz")
+
+
+#
+sequences<- getSequences(seqtab.nochim)
+names(sequences)<-sequences
+
+#
+alignment <- AlignSeqs(DNAStringSet(sequences), anchor=NA)
+phang.align <- phyDat(as(alignment, "matrix"), type="DNA")
+dm <- dist.ml(phang.align)
+treeNJ <- NJ(dm) 
+fit<- pml(treeNJ, data = phang.align)
+fitGTR <- update(fit, k=4, inv=0.2)
+
+#
+fitGTR <- optim.pml(fitGTR, model = "GTR", optInv = TRUE, optGamma = TRUE,
+                    rearrangement = "stochastic", control = pml.control(trace = 0))
+
+# Adding  metadata
+map <- import_qiime_sample_data("UclustCombinedMicrobiomeDataK-copy1.tsv")
+
+#
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows = FALSE),
+              tax_table(taxa.print),phy_tree(fitGTR$tree))
+
+
+
+## Merge phyloseq object and meta data
+ps <- merge_phyloseq(ps, map)
+ps
+
+### Taxa cleaning to remove sequences that aligned to chloroplast and mitochondria
+ps1 <- ps0 %>%
+  subset_taxa(
+    Kingdom == "Bacteria" &
+    Family  != "Mitochondria" &
+    Class   != "Chloroplast" &
+    Phylum != "Cyanobacteria" &
+    Phylum != "Chloroplast" &
+    Phylum != "Chloroflexi")
+
+### 
+set.seed(711)
+
+physeq.gen <- aggregate_taxa(ps,"Genus")
+
+dom.tax <- dominant_taxa(ps,level = "Genus", group="Year")
+head(dom.tax$dominant_overview)
+
+##
+# Get count of phyla
+table(phyloseq::tax_table(ps)[, "Phylum"])
+
+#Get count of Genus
+table(phyloseq::tax_table(ps)[, "Genus"])
+
+# Compute prevalence of each feature
+prevdf <- apply(X = otu_table(ps), 
+               MARGIN = ifelse(taxa_are_rows(ps), yes = 1, no = 2), 
+               FUN = function(x){sum(x > 0)})
+
+# Add taxonomy and total read counts 
+prevdf <- data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps),
+                    tax_table(ps))
+
+
+## Compute the total and average prevalences of the features in each phylum.
+plyr::ddply(prevdf, "Phylum", function(df1){cbind(mean(df1$Prevalence),sum(df1$Prevalence))})
+
+# Giving our seq headers more manageable names (ASV_1, ASV_2...)
+asv_seqs <- colnames(seqtab.nochim)
+asv_headers <- vector(dim(seqtab.nochim)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim)[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+
+# Making and writing out a fasta of our final ASV seqs:
+    
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "ASVs.fa")
+
+# count table:
+asv_tab <- t(seqtab.nochim_final)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, "ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+
+# Giving taxonomy table corresponding names as above (ASV_1, ASV_2...)
+row.names(taxa.PRINT) <- sub(">", "", asv_headers)
+write.table(taxa.PRINT, "ASVs_named_correctly.tsv", sep="\t", quote=F, col.names=NA)
+
+#
+tax_tab <- as.matrix(read.table("ASVs_named_correctly.tsv", header=T,
+           row.names=1, check.names=F, sep="\t"))
+
+sample_info_tab <- read.table("UclustCombinedMicrobiomeDataK.tsv", header=F, row.names=1,
+                   check.names=F, sep="\t")
+
+sample_info_tab$Replicate<- as.character(sample_info_tab$V2)
+sample_info_tab$Site<- as.character(sample_info_tab$V3)
+sample_info_tab$Color<- as.character(sample_info_tab$V4)
+sample_info_tab$Year<- as.character(sample_info_tab$V5)
+sample_info_tab$SampleID<- as.character(sample_info_tab$V6)
+
+#Normalizing for sampling depth
+deseq_counts <- DESeqDataSetFromMatrix(count_tab, colData = sample_info_tab, design = ~ Site) 
+deseq_counts_vst <- DESeq(deseq_counts,sfType = "poscounts")
+vst_trans_count_tab <- assay(deseq_counts_vst)
+
+#Rarefaction curves
+rarecurve(t(count_tab), step=100, col=sample_info_tab$color, lwd=2, ylab="ASVs", label=F)
+abline(v=(min(rowSums(t(count_tab))))) # Adding a vertical line at the fewest seqs in any sample to curve above 
+
+# Abundance value transformation. 
+ps_rel_abund <- phyloseq::transform_sample_counts(ps, function(x){x / sum(x)})
+
+
+#Agglomerate to phylum-level and rename
+ps_phylum <- phyloseq::tax_glom(ps, "Phylum")
+phyloseq::taxa_names(ps_phylum) <- phyloseq::tax_table(ps_phylum)[, "Phylum"]
+phyloseq::otu_table(ps_phylum)[1:4, 1:4]
+
+#Subset groups by year
+year_2016 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2016")
+head(sample_sums(year_2016))
+head(get_taxa(year_2016))
+
+year_2016_16S<- (get_taxa(year_2016))
+year_2016_16S<- t(year_2016_16S)
+write.csv(year_2016_16S, "Year_2016_Genus_count.csv")
+
+
+#Subset groups by year
+year_2017 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2017")
+head(sample_sums(year_2017))
+head(get_taxa(year_2017))
+
+year_2017_16S<- (get_taxa(year_2017))
+year_2017_16S<- t(year_2017_16S)
+write.csv(year_2017_16S, "Year_2017_Genus_count.csv")
+
+#Subset groups by year
+year_2019 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2019")
+head(sample_sums(year_2019))
+head(get_taxa(year_2019))
+
+year_2019_16S<- (get_taxa(year_2019))
+year_2019_16S<- t(year_2019_16S)
+write.csv(year_2019_16S, "Year_2019_Genus_count.csv")
+
+#Subset groups by year
+year_2020 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2020")
+head(sample_sums(year_2020))
+head(get_taxa(year_2020))
+
+year_2020_16S<- (get_taxa(year_2020))
+write.csv(year_2020_16S, "Year_2020_Genus_count.csv")
+
+#Subset groups by year
+year_2021 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2021")
+head(sample_sums(year_2021))
+head(get_taxa(year_2021))
+
+year_2021_16S<- (get_taxa(year_2021))
+write.csv(year_2021_16S, "Year_2021_Genus_count.csv")
+
+
+#Subset groups by year
+year_2022 <- phyloseq::subset_samples(ps_genus_site, Year == "Yr_2022")
+head(sample_sums(year_2022))
+head(get_taxa(year_2022))
+
+year_2022_16S<- (get_taxa(year_2022))
+write.csv(year_2022_16S, "Year_2022_Genus_count.csv")
+
+
+###Alpha Diversity
+set.seed(123)
+adiv <- data.frame(
+    "Observed" = phyloseq::estimate_richness(ps, measures = "Observed"),
+  "Shannon" = phyloseq::estimate_richness(ps, measures = "Shannon"),
+  "InvSimpson" = phyloseq::estimate_richness(ps, measures = "InvSimpson"),
+    "Chao1" = phyloseq::estimate_richness(ps, measures = "Chao1"),
+  "Site" = phyloseq::sample_data(ps)$Site,
+    "Year" = phyloseq::sample_data(ps)$Year,
+"Replicate" = phyloseq::sample_data(ps)$Replicate)
+head(adiv)
+
+
+alpha.diversity <- estimate_richness(ps, measures = c("Observed", "InvSimpson", "Shannon"))
+head(alpha.diversity)
+
+
+##Extract meta data
+ps.meta <- meta(ps)
+(head(ps.meta))
+
+##Add the diversity table to metadata
+ps.meta$Shannon <- adiv$Shannon 
+ps.meta$InverseSimpson <- adiv$InvSimpson
+ps.meta$Observed <- adiv$Observed
+ps.meta$Chao1.Chao1 <- adiv$Chao1.Chao1
+
+
+### create a list of pairwise comaprisons for Year
+Ferment_rep <- levels(ps.meta$Year)
+Ferment_rep  <- unique(ps.meta$Year)
+print(Ferment_rep)
+
+# make a pairwise list that we want to compare.
+Ferment_rep.pairs <-  combn(seq_along(Ferment_rep), 2, simplify = FALSE, FUN = function(i)Ferment_rep[i])
+                                 
+print(Ferment_rep.pairs)
+
+
+# Using ggpubr to plot
+
+p1 <- ggboxplot(ps.meta, x = "Year", y = "Shannon",
+ , fill = "Year", palette = c("#b2df8a", "#D55E00","chocolate4", "blue","red","yellow")) 
+
+comps <- make_pairs(sample_data(ps.meta)$Year)
+Shannon_alpha_diversity <- p1 + stat_compare_means(
+      comparisons = comps,
+      label = "p.format", vjust = 0.19)
+
+print(Shannon_alpha_diversity)
+
+
+###Run a Shapiro-Wilk test of normality to test for normalcy statistically
+
+shapiro.test(alpha.diversity$Shannon)
+
+
+## Non-parametric permutation based MANOVA (often called PERMANOVA) implemented with ADONIS
+
+otu <- abundances(ps_rel_abund)
+meta <- meta(ps_rel_abund)
+
+#Statistics - Bdiv
+permanova <- adonis(t(otu) ~ Batch, data = meta, permutations=1000, method = "bray")
+
+#P-value
+print(as.data.frame(permanova$aov.tab)["Batch", "Pr(>F)"])
+
+##### Using phylogenic tree info to do some beta-diversity analysis
+## First generate distances
+ord_unifrac <- ordinate(ps_rel_abund, method = "PCoA", distance = "wunifrac") 
+ord_unifrac_un <- ordinate(ps_rel_abund, method = "PCoA", distance = "unifrac") 
+
+#Plot ordinations
+set.seed(123)
+a <- plot_ordination(ps_rel_abund, ord_unifrac, color = "Year") + geom_point(size = 8)
+
+#Plot ordinations
+set.seed(123)
+a <- plot_ordination(ps_rel_abund, ord_unifrac, color = "Year") + geom_point(size = 8)
+b <- plot_ordination(ps_rel_abund, ord_unifrac_un, color = "Year") + geom_point(size = 4)
+
+### Coplotting
+cowplot::plot_grid(a, b, nrow = 1, ncol = 2, scale = .9, labels = c("Weighted", "Unweighted"))
+
+
+#Differentially expressed ASVs
+
+sample_data(ps)$Year <- as.factor(sample_data(ps)$Year)
+ds <- phyloseq_to_deseq2(ps, ~ Year)
+
+# calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(ds), 1, gm_mean)
+DESeq2_dds = estimateSizeFactors(ds, geoMeans = geoMeans)
+DESeq2_dds = DESeq(DESeq2_dds, fitType="local")
+
+# Extracting the differentially expressed ASVs e.g Vintage 2016 versus vintage 2017
+alpha <- 0.05
+res <- results(DESeq2_dds, contrast=c("Year", "Yr_2016", "Yr_2017"), alpha=alpha)
+res <- res[order(res$padj, na.last=NA), ]
+res_sig <- res[(res$padj < alpha), ]
+res_sig
+
+# Plotting them out
+res_sig <- cbind(as(res_sig, "data.frame"), as(tax_table(ps)[rownames(res_sig), ], "matrix"))
+colnames(res_sig) <- make.unique(names(res_sig))
+ ggplot(res_sig, aes(x=Genus, y=log2FoldChange, color=Genus)) +
+    geom_jitter(size=3, width = 0.2) +
+    theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
