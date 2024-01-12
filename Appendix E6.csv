@@ -1,0 +1,19 @@
+(A)   ANOVA(By terms) for RDA Using Bacterial Data,,,,
+,Df,Variance,F,Pr(>F)
+Ave..Temp,1,0.105384071,1.576809956,0.021
+Max.Temp,1,0.111420115,1.667124306,0.033
+Rainfall,1,0.145271854,2.173631217,0.002
+Residual,8,0.534669739,NA,NA
+,,,,
+,,,,
+,,,,
+,,,,
+(B)      ANOVA (By terms) for CCA Using Fungi Data,,,,
+,,,,
+,Df,ChiSquare,F,Pr(>F)
+Min..Temp,1,0.6184634,1.739796,0.004
+Ave..Temp,1,0.5702797,1.604251,0.002
+Max.Temp,1,0.651006,1.831341,0.001
+Rainfall,1,0.4629061,1.302198,0.107
+Humidity,1,0.5353596,1.506017,0.014
+Residual,6,2.1328826,NA,NA
